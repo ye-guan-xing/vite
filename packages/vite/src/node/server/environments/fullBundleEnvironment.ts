@@ -116,6 +116,8 @@ export class FullBundleDevEnvironment extends DevEnvironment {
     this.hot.on('vite:client:connect', (_payload, client) => {
       // Replay the cached build error to freshly connected clients.
       if (this.lastBuildError) {
+        debug?.('REPLAY: replaying last build error to newly connected client')
+
         client.send({
           type: 'error',
           err: prepareError(this.lastBuildError),
@@ -132,7 +134,6 @@ export class FullBundleDevEnvironment extends DevEnvironment {
     this.devEngine = await dev(rollupOptions, outputOptions, {
       onHmrUpdates: (result) => {
         if (result instanceof Error) {
-          this.lastBuildError = result
           // TODO: send to the specific client
           for (const client of this.clients.getAll()) {
             client.send({
@@ -142,7 +143,6 @@ export class FullBundleDevEnvironment extends DevEnvironment {
           }
           return
         }
-        this.lastBuildError = null
         const { updates, changedFiles } = result
         if (changedFiles.length === 0) {
           return
@@ -285,6 +285,23 @@ export class FullBundleDevEnvironment extends DevEnvironment {
 
   async triggerBundleRegenerationIfStale(): Promise<boolean> {
     const bundleState = await this.devEngine.getBundleState()
+
+    // Trigger full build if the HMR errors,
+    // this is to make it easier to recover if the HMR generation is broken for some reason.
+    if (
+      this.initialBuildCompleted &&
+      bundleState.lastBuildErrored &&
+      bundleState.lastErrorStage === 'Hmr'
+    ) {
+      debug?.(`TRIGGER: access after HMR-stage failure, forcing full rebuild`)
+
+      this.devEngine.triggerFullBuild()
+      this.devEngine.ensureLatestBuildOutput().then(() => {
+        this.debouncedFullReload()
+      })
+      return true
+    }
+
     const shouldTrigger =
       bundleState.hasStaleOutput &&
       !bundleState.lastBuildErrored &&
